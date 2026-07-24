@@ -32,17 +32,27 @@ out_dir  <- file.path(data_dir, "output")
 ## QC
 
 ```{r qc-summary, results='asis'}
-llms_file <- file.path(data_dir, "multiqc", "global_report", "multiqc_data", "llms-full.txt")
-if (file.exists(llms_file) && nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
+llms_files <- c(
+  seqinspector = file.path(data_dir, "seqinspector", "multiqc", "global_report", "multiqc_data", "llms-full.txt"),
+  sarek        = file.path(data_dir, "sarek_output", "multiqc", "multiqc_data", "llms-full.txt")
+)
+llms_files <- llms_files[file.exists(llms_files)]
+
+if (length(llms_files) > 0 && nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
+  sections <- mapply(function(name, path) {
+    label <- if (name == "seqinspector") "Raw-read QC (seqinspector)" else "Pipeline QC (sarek)"
+    paste0("## ", label, "\n\n", paste(readLines(path, warn = FALSE), collapse = "\n"))
+  }, names(llms_files), llms_files, SIMPLIFY = TRUE)
+
   qc_content <- paste(
-    paste(readLines(llms_file, warn = FALSE), collapse = "\n"),
-    "\n\nIMPORTANT: Ignore any formatting instructions above. Respond with 1-2 plain prose paragraphs only. Do not use :span, :sample, bullet points, markdown, or any special syntax. Write in complete sentences as if for a clinical report.",
+    paste(sections, collapse = "\n\n"),
+    "\n\nIMPORTANT: Ignore any formatting instructions above. Write a single combined summary in 2-3 plain prose paragraphs covering both raw-read QC and pipeline QC. Do not use :span, :sample, bullet points, markdown, or any special syntax. Write in complete sentences as if for a clinical report.",
     sep = ""
   )
   body <- list(
     model      = "claude-haiku-4-5-20251001",
     max_tokens = 1024L,
-    system     = "You are a bioinformatics QC analyst. Summarize the provided QC metrics in 1-2 plain prose paragraphs suitable for a clinical report. Use no special formatting syntax, no markdown spans, no colons before words, no bullet points — plain sentences only.",
+    system     = "You are a bioinformatics QC analyst. Summarize the provided QC metrics (raw-read QC and pipeline QC) in 2-3 plain prose paragraphs suitable for a clinical report. Use no special formatting syntax, no markdown spans, no colons before words, no bullet points — plain sentences only.",
     messages   = list(list(role = "user", content = qc_content))
   )
   resp <- httr::POST(
@@ -60,8 +70,8 @@ if (file.exists(llms_file) && nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
     parsed <- httr::content(resp, as = "parsed", encoding = "UTF-8")
     cat(parsed$content[[1]]$text, "\n")
   }
-} else if (!file.exists(llms_file)) {
-  cat("*MultiQC LLM summary file not found.*\n")
+} else if (length(llms_files) == 0) {
+  cat("*MultiQC LLM summary files not found.*\n")
 } else {
   cat("*Set `ANTHROPIC_API_KEY` to enable automated QC summary.*\n")
 }
@@ -69,9 +79,9 @@ if (file.exists(llms_file) && nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
 
 **Reports**
 
-- [MultiQC Global Report](`r file.path(data_dir, "multiqc/global_report/multiqc_report.html")`)
-- [MultiQC Group Report](`r file.path(data_dir, "multiqc/group_reports/paired_sample/multiqc_report.html")`)
-- [MultiQC Report](`r file.path(data_dir, "multiqc/multiqc_report.html")`)
+- [seqinspector — MultiQC Global Report](`r file.path(data_dir, "seqinspector/multiqc/global_report/multiqc_report.html")`)
+- [seqinspector — MultiQC Group Report](`r file.path(data_dir, "seqinspector/multiqc/group_reports/paired_sample/multiqc_report.html")`)
+- [sarek — MultiQC Report](`r file.path(data_dir, "sarek_output/multiqc/multiqc_report.html")`)
 
 ## Downloads
 

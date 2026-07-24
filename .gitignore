@@ -7,3 +7,4 @@ BSRBioinformaticsTools/
 *~
 .Rhistory
 .RData
+orchestration/conf/run_*.conf
