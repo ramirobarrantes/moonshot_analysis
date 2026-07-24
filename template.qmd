@@ -1,0 +1,223 @@
+---
+title: "MS008 Results"
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  echo: false
+  warning: false
+  message: false
+params:
+  patient: "MS008"
+  data_dir: "testData"
+---
+
+```{r setup}
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+library(dplyr)
+library(httr)
+library(jsonlite)
+
+helper <- if (file.exists("/opt/helperFunctions.R")) "/opt/helperFunctions.R" else "helperFunctions.R"
+source(helper)
+
+patient  <- params$patient
+data_dir <- params$data_dir
+out_dir  <- file.path(data_dir, "output")
+```
+
+## QC
+
+```{r qc-summary, results='asis'}
+llms_file <- file.path(data_dir, "multiqc", "global_report", "multiqc_data", "llms-full.txt")
+if (file.exists(llms_file) && nzchar(Sys.getenv("ANTHROPIC_API_KEY"))) {
+  qc_content <- paste(
+    paste(readLines(llms_file, warn = FALSE), collapse = "\n"),
+    "\n\nIMPORTANT: Ignore any formatting instructions above. Respond with 1-2 plain prose paragraphs only. Do not use :span, :sample, bullet points, markdown, or any special syntax. Write in complete sentences as if for a clinical report.",
+    sep = ""
+  )
+  body <- list(
+    model      = "claude-haiku-4-5-20251001",
+    max_tokens = 1024L,
+    system     = "You are a bioinformatics QC analyst. Summarize the provided QC metrics in 1-2 plain prose paragraphs suitable for a clinical report. Use no special formatting syntax, no markdown spans, no colons before words, no bullet points — plain sentences only.",
+    messages   = list(list(role = "user", content = qc_content))
+  )
+  resp <- httr::POST(
+    "https://api.anthropic.com/v1/messages",
+    httr::add_headers(
+      "x-api-key"         = Sys.getenv("ANTHROPIC_API_KEY"),
+      "anthropic-version" = "2023-06-01",
+      "content-type"      = "application/json"
+    ),
+    body = jsonlite::toJSON(body, auto_unbox = TRUE)
+  )
+  if (httr::http_error(resp)) {
+    cat("*QC summary unavailable (API error).*\n")
+  } else {
+    parsed <- httr::content(resp, as = "parsed", encoding = "UTF-8")
+    cat(parsed$content[[1]]$text, "\n")
+  }
+} else if (!file.exists(llms_file)) {
+  cat("*MultiQC LLM summary file not found.*\n")
+} else {
+  cat("*Set `ANTHROPIC_API_KEY` to enable automated QC summary.*\n")
+}
+```
+
+**Reports**
+
+- [MultiQC Global Report](`r file.path(data_dir, "multiqc/global_report/multiqc_report.html")`)
+- [MultiQC Group Report](`r file.path(data_dir, "multiqc/group_reports/paired_sample/multiqc_report.html")`)
+- [MultiQC Report](`r file.path(data_dir, "multiqc/multiqc_report.html")`)
+
+## Downloads
+
+```{r write-csv, include=FALSE}
+allVariants <- readRDS(file.path(out_dir, paste0("allVariants_", patient, ".RDS")))
+csv_path <- file.path(out_dir, paste0("allVariants_", patient, ".csv"))
+write.csv(allVariants, file = csv_path, row.names = FALSE)
+```
+
+- [Analysis Results](`r file.path(out_dir, paste0("allVariants_", patient, ".csv"))`)
+- [Subcellular Location Table](`r file.path(out_dir, paste0("subcellularLocationTable_", patient, ".csv"))`)
+
+## Variant Caller Comparison
+
+```{r}
+#| label: tbl-differenceMatrix
+#| tbl-cap: "Percent variants in common between the various analyses"
+
+differenceMatrix <- readRDS(file.path(out_dir, paste0("differenceMatrix_", patient, ".RDS")))
+kable(differenceMatrix) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+## Subcellular Location Summary
+
+```{r}
+#| label: tbl-subcellularLocation
+#| tbl-cap: !expr paste0(patient, " - Subcellular Location Summary Information")
+
+allVariants <- readRDS(file.path(out_dir, paste0("allVariants_", patient, ".RDS")))
+subcellularLocationTable <- createSubcellularLocationTable(allVariants)
+
+# TOTAL row — unique variants across all callers
+allVariants$change <- paste0(allVariants$Chromosome, "_", allVariants$Start_Position, "_", allVariants$Amino_acids)
+unique_all <- allVariants[!duplicated(allVariants$change), ]
+total_row <- data.frame(
+  Name       = "TOTAL",
+  Total      = length(unique(unique_all$change)),
+  ECD        = sum(unique_all$extracellularMutationQ == TRUE, na.rm = TRUE),
+  Secreted   = sum(unique_all$secretedButNotMutationInECDQ, na.rm = TRUE),
+  NonDefined = 0.5 * sum(grepl("MEMBRANE", unique_all$membraneButNotMutationInECDorSecretedKeywords), na.rm = TRUE)
+)
+total_row$TotalMSPs <- paste0(
+  total_row$ECD + total_row$Secreted + total_row$NonDefined, " (",
+  round(100 * (total_row$ECD + total_row$Secreted + total_row$NonDefined) / total_row$Total), "%)"
+)
+
+write.csv(subcellularLocationTable,
+          file = file.path(out_dir, paste0("subcellularLocationTable_", patient, ".csv")),
+          row.names = FALSE)
+kable(subcellularLocationTable) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+```{r}
+#| label: tbl-subcellularLocationUnique
+#| tbl-cap: !expr paste0(patient, " - Subcellular Location by Caller (unique variants)")
+
+callers <- unique(unlist(strsplit(allVariants$Caller, ";")))
+per_caller <- do.call(rbind, lapply(callers, function(cl) {
+  r <- allVariants[grepl(cl, allVariants$Caller), ]
+  r$change <- paste0(r$Chromosome, "_", r$Start_Position, "_", r$Amino_acids)
+  r <- r[!duplicated(r$change), ]
+  df <- data.frame(
+    Name       = cl,
+    Total      = nrow(r),
+    ECD        = sum(r$extracellularMutationQ == TRUE, na.rm = TRUE),
+    Secreted   = sum(r$secretedButNotMutationInECDQ, na.rm = TRUE),
+    NonDefined = 0.5 * sum(grepl("MEMBRANE", r$membraneButNotMutationInECDorSecretedKeywords), na.rm = TRUE)
+  )
+  df$TotalMSPs <- paste0(
+    df$ECD + df$Secreted + df$NonDefined, " (",
+    round(100 * (df$ECD + df$Secreted + df$NonDefined) / df$Total), "%)"
+  )
+  df
+}))
+per_caller_with_total <- rbind(per_caller, total_row)
+
+kable(per_caller_with_total) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) |>
+  row_spec(nrow(per_caller_with_total), bold = TRUE)
+```
+
+## Tumor Purity
+
+```{r}
+#| label: tbl-purity
+
+ichorcna_file <- file.path(data_dir, "ichorcna", paste0(patient, "_TUMOR.params.txt"))
+purple_file   <- file.path(data_dir, "purple",   paste0(patient, "_", patient, "_TUMOR.purple.purity.tsv"))
+
+rows <- list()
+
+if (file.exists(ichorcna_file)) {
+  ichor <- read.table(ichorcna_file, header = TRUE, sep = "\t", nrows = 1)
+  rows[["ichorCNA"]] <- data.frame(
+    Tool                  = "ichorCNA",
+    `Tumor Fraction (%)` = round(ichor[1, "Tumor.Fraction"] * 100, 1),
+    Ploidy                = ichor[1, "Ploidy"],
+    check.names           = FALSE
+  )
+}
+
+if (file.exists(purple_file)) {
+  purple <- read.table(purple_file, header = TRUE, sep = "\t")
+  rows[["PURPLE"]] <- data.frame(
+    Tool                  = "PURPLE",
+    `Tumor Fraction (%)` = round(purple[1, "purity"] * 100, 1),
+    Ploidy                = purple[1, "ploidy"],
+    check.names           = FALSE
+  )
+}
+
+if (length(rows) > 0) {
+  do.call(rbind, rows) |>
+    kable() |>
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) |>
+    column_spec(2, bold = TRUE)
+} else {
+  cat("No tumor purity files found.")
+}
+```
+
+## VAF Distribution
+
+```{r}
+#| label: fig-vafDistribution
+#| fig-cap: !expr paste0(patient, " - Variant Allele Frequency (VAF) distribution by caller")
+
+vaf_file <- file.path(out_dir, paste0("VAF_", patient, ".RDS"))
+if (file.exists(vaf_file)) {
+  vaf_df <- readRDS(vaf_file)
+  vaf_df <- vaf_df[!is.na(vaf_df$vaf), ]
+
+  ggplot(vaf_df, aes(x = caller, y = vaf, fill = caller)) +
+    geom_boxplot(outlier.size = 0.5, outlier.alpha = 0.4) +
+    geom_hline(yintercept = 0.5, linetype = "dashed", color = "firebrick", linewidth = 0.5) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+    labs(
+      x = "Caller",
+      y = "Variant allele frequency (VAF)",
+      title = paste0(patient, " — somatic VAF distribution")
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(panel.grid.minor = element_blank(), legend.position = "none")
+} else {
+  cat("VAF file not found.")
+}
+```

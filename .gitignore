@@ -1,0 +1,9 @@
+DBs/
+testData/
+BSRBioinformaticsTools/
+*.html
+*.RDS
+*.csv
+*~
+.Rhistory
+.RData
